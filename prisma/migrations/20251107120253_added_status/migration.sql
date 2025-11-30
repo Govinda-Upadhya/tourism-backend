@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE "Vehicles" ALTER COLUMN "status" SET DEFAULT 'AVAILABLE';

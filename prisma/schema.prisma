@@ -1,0 +1,115 @@
+
+
+generator client {
+  provider = "prisma-client-js"
+
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+enum Status{
+  ACTIVE
+  PENDING
+  CONFIRMED
+  CANCELLED
+  UPCOMING
+  ONGOING
+  AVAILABLE
+}
+enum Client{
+  INTERNATIONAL
+  LOCAL
+}
+enum VehicleType{
+  Sedan
+  SUV
+  Bus
+  Van
+  Luxury
+}
+model Vehicles {
+  id            String              @id @default(uuid())
+  name          String
+  contact       String
+  image         String
+  vehicle_type  VehicleType
+  status        Status @default(AVAILABLE)
+
+  tourAssignments TourPackageVehicle[]  // relation through explicit table
+}
+
+model TourPackages {
+  id           String              @id @default(uuid())
+  name         String
+  category         String
+  mainImage    String?
+  carousel     String[]
+  price        Int
+  status       Status               @default(ACTIVE)
+  description  String[]
+  highlights   String[]
+  included     String[]
+  
+  bookings     Bookings[]
+  createdAt    DateTime             @default(now())
+  updatedAt    DateTime             @updatedAt
+
+  vehicleAssignments TourPackageVehicle[]
+}
+
+model TourPackageVehicle {
+  id            String      @id @default(uuid())
+
+  tourPackage   TourPackages @relation(fields: [tourPackageId], references: [id])
+  tourPackageId String
+
+  vehicle       Vehicles     @relation(fields: [vehicleId], references: [id])
+  vehicleId     String
+
+  assignedAt    DateTime     @default(now())
+  note          String?
+  status        Status?      // optional field, e.g. ACTIVE, UNAVAILABLE
+}
+
+model Events{
+  id String @id @default(uuid())
+  name String
+  image String
+  price Int
+  status Status @default(UPCOMING)
+  date String 
+  availability String
+  maxpeople Int 
+  location String
+  vehicle String
+  description String[]
+  highlights String[]
+  includes String[]
+  bookings Bookings[]
+}
+
+
+model Bookings{
+  id String @id @default(uuid())
+  clientType Client @default(INTERNATIONAL)
+  fullName String
+  email String
+  phone String
+  country String
+  adress String 
+  travelers Int
+  vehicle String
+  booking_date DateTime @default(now())
+  arrival_date DateTime
+  departure_date DateTime
+  total_amount Int
+  payment_status Status
+  tourPackageId String?
+  eventId String?
+  packagename String @default("new")
+
+  tourPackage TourPackages? @relation(fields: [tourPackageId],references: [id])
+  eventPackage Events? @relation(fields: [eventId],references: [id])
+}
