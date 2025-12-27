@@ -14,14 +14,14 @@ export const createPackage = async (req: Request, res: Response) => {
       name,
       category,
       price,
-      vehcileId,
+      vehicleId,
       description,
       highlights,
-      vehicleId,
       included,
     } = req.body;
+    console.log("vehicle", vehicleId);
     const vehicle = await prismaClient.vehicles.findFirst({
-      where: { id: vehcileId },
+      where: { id: vehicleId },
     });
     highlights = highlights.split(",");
     included = included.split(",");
@@ -60,7 +60,7 @@ export const createPackage = async (req: Request, res: Response) => {
           connect: { id: clientRes.id }, // existing tour package ID
         },
         vehicle: {
-          connect: { id: vehcileId }, // must be a valid existing vehicle ID
+          connect: { id: vehicleId }, // must be a valid existing vehicle ID
         },
         note: "vehicle assigned",
         status: "ACTIVE",
@@ -79,78 +79,102 @@ export const createPackage = async (req: Request, res: Response) => {
 };
 
 export const updatePackage = async (req: Request, res: Response) => {
-  let {
-    id,
-    name,
-    category,
-    price,
-    carouselImagesUrl,
-    mainUrl,
-    description,
-    highlights,
-    vehicle,
-    included,
-  } = req.body;
-  description = description.split(",");
-  highlights = highlights.split(",");
-  included = included.split(",");
   try {
+    let {
+      id,
+      name,
+      category,
+      price,
+      carouselImagesUrl,
+      mainUrl,
+      description,
+      highlights,
+      included,
+    } = req.body;
+
+    // ---------- Normalize text fields ----------
+    description = description?.split(",") || [];
+    highlights = highlights?.split(",") || [];
+    included = included?.split(",") || [];
+
+    // ---------- Normalize carouselImagesUrl ----------
+    if (!carouselImagesUrl) {
+      carouselImagesUrl = [];
+    }
+
+    if (typeof carouselImagesUrl === "string") {
+      carouselImagesUrl = [carouselImagesUrl];
+    }
+
+    // Remove base_url from existing image URLs
+    carouselImagesUrl = carouselImagesUrl.map((img: string) =>
+      img.replace(base_url, "")
+    );
+
+    // ---------- Files ----------
     const files = req.files as {
       [fieldname: string]: Express.Multer.File[];
     };
 
-    const mainImage = files?.mainImage?.[0]?.filename || null;
-    const carouselImages =
+    const mainImageFile = files?.mainImage?.[0]?.filename || null;
+    const carouselFiles =
       files?.carouselImages?.map((file) => file.filename) || [];
-    // Construct image URLs (so frontend can access them)
-    let mainImageUrl = mainImage ? `/uploads/${mainImage}` : null;
-    if (mainImageUrl == null) {
-      mainImageUrl = mainUrl.replace(base_url, "");
-    }
-    let carouselImageUrls: string[] = [];
-    carouselImagesUrl = carouselImagesUrl.map((img: string) =>
-      img.replace(base_url, "")
-    );
-    let carouselImage = carouselImages.map((img) => `/uploads/${img}`);
-    carouselImageUrls = [...carouselImage, ...carouselImagesUrl];
-    const tourpackage = await prismaClient.tourPackages.findFirst({
-      where: { id: id },
+
+    // ---------- Main image ----------
+    let mainImageUrl = mainImageFile
+      ? `/uploads/${mainImageFile}`
+      : mainUrl
+      ? mainUrl.replace(base_url, "")
+      : null;
+
+    // ---------- Carousel images ----------
+    const newCarouselImages = carouselFiles.map((img) => `/uploads/${img}`);
+
+    const finalCarouselImages = [...newCarouselImages, ...carouselImagesUrl];
+
+    // ---------- Fetch existing package ----------
+    const tourPackage = await prismaClient.tourPackages.findUnique({
+      where: { id },
     });
-    const existingimages = tourpackage!.carousel;
-    for (let i = 0; i < existingimages.length; i++) {
-      let removeImage = true;
-      for (let j = 0; j < carouselImageUrls.length; j++) {
-        if (existingimages[i] == carouselImageUrls[j]) {
-          removeImage = false;
-          break;
-        }
-      }
-      if (removeImage) {
-        const oldPath = path.join(__dirname, "..", existingimages[i]!);
+
+    if (!tourPackage) {
+      return res.status(404).json({ msg: "Tour package not found" });
+    }
+
+    // ---------- Delete removed images ----------
+    const existingImages = tourPackage.carousel || [];
+
+    for (const img of existingImages) {
+      if (!finalCarouselImages.includes(img)) {
+        const oldPath = path.join(__dirname, "..", img);
         fs.unlink(oldPath, (err) => {
-          if (err) console.log("Old image not found:", err);
+          if (err) console.log("Old image not found:", err.message);
         });
       }
     }
-    const clientRes = await prismaClient.tourPackages.update({
-      where: { id: id },
+
+    // ---------- Update DB ----------
+    await prismaClient.tourPackages.update({
+      where: { id },
       data: {
         name,
         category,
-        mainImage: mainImageUrl!,
-        carousel: carouselImageUrls,
         price: parseInt(price),
         description,
         highlights,
         included,
+        mainImage: mainImageUrl!,
+        carousel: finalCarouselImages,
       },
     });
+
     return res.json({ msg: "Tour package updated successfully" });
   } catch (error) {
-    console.log("error", error);
-    return res.json({ msg: "error occured", err: error });
+    console.error("Update package error:", error);
+    return res.status(500).json({ msg: "Error occurred", error });
   }
 };
+
 export const deletePackage = async (req: Request, res: Response) => {
   let { id } = req.body;
   console.log("package id to delete", id);

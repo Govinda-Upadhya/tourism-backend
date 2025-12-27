@@ -1,10 +1,11 @@
 import { Router, type Request, type Response } from "express";
-import { prismaClient } from "../lib";
+import { prismaClient, transporterMain } from "../lib";
 import { sleep } from "bun";
 import Stripe from "stripe";
 import { base_url } from "..";
 import "dotenv/config";
-import e from "express";
+
+import { emailQueue } from "../worker/queue";
 export const routesUser = Router();
 
 const stripe = new Stripe(process.env.STRIPE_API!);
@@ -33,118 +34,167 @@ routesUser.get("/getEvents", async (req, res) => {
   return res.json({ events });
 });
 
-// routesUser.post(
-//   "/create-payment-intent",
-//   async (req: Request, res: Response) => {
-//     try {
-//       const { total_price } = req.body; // amount in rupees or cents
-//       const amount = parseFloat(total_price);
-//       console.log(amount);
-//       const paymentIntent = await stripe.paymentIntents.create({
-//         amount: amount * 100, // Stripe uses smallest currency unit (₹1 = 100 paise)
-//         currency: "inr",
-//         automatic_payment_methods: { enabled: true },
-//       });
-
-//       res.send({
-//         clientSecret: paymentIntent.client_secret,
-//       });
-//     } catch (error) {
-//       res.status(500).send({ error: error.message });
-//     }
-//   }
-// );
-
-routesUser.post(
-  "/create-checkout-session",
-  async (req: Request, res: Response) => {
-    try {
-      console.log("payment session");
-      const { price } = req.body;
-
-      const session = await stripe.checkout.sessions.create({
-        mode: "payment",
-        line_items: [
-          {
-            price_data: {
-              currency: "inr",
-              product_data: {
-                name: "Seoul City Tour",
-              },
-              unit_amount: price * 100, // convert rupees to paise
-            },
-            quantity: 1,
-          },
-        ],
-        success_url: "http://127.0.0.1:5500/Tourism-main/payment-success.html",
-        cancel_url: "http://localhost:5500/payment-cancel.html",
-      });
-
-      res.json({ url: session.url });
-    } catch (error) {
-      console.error(error);
-      res.status(500).send({ error: (error as Error).message });
-    }
-  }
-);
 const webhookEndpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
-routesUser.post(
-  "/webhook",
-  e.raw({ type: "application/json" }),
-  async (req, res) => {
-    const sig = req.headers["stripe-signature"];
-    if (!sig) {
-      return;
-    }
-    let event;
+export const webHook = async (req: Request, res: Response) => {
+  const sig = req.headers["stripe-signature"];
 
-    try {
-      event = stripe.webhooks.constructEvent(
-        req.body,
-        sig,
-        webhookEndpointSecret!
-      );
-    } catch (err) {
-      console.log("Webhook signature verification failed.", err);
-      return res.status(400).send(`Webhook Error: ${err}`);
-    }
-
-    // EVENT HANDLING
-    if (event.type === "checkout.session.completed") {
-      const session = event.data.object;
-      if (!session) {
-        return;
-      }
-      // Update payment status in your database
-      await prismaClient.bookings.update({
-        where: { id: session.metadata.bookingId },
-        data: { payment_status: "SUCCESS" },
-      });
-
-      console.log("Booking updated to SUCCESS");
-    }
-
-    res.json({ received: true });
+  if (!sig) {
+    return res.status(400).send("Missing Stripe signature");
   }
-);
+
+  let event: Stripe.Event;
+
+  try {
+    event = await stripe.webhooks.constructEventAsync(
+      req.body, // MUST be raw Buffer
+      sig,
+      process.env.STRIPE_WEBHOOK_SECRET!
+    );
+  } catch (err) {
+    console.error("Webhook verification failed", err);
+    return res.status(400).send("Invalid signature");
+  }
+
+  try {
+    switch (event.type) {
+      /**
+       * ✅ PAYMENT SUCCESS
+       */
+      case "checkout.session.completed": {
+        const session = event.data.object as Stripe.Checkout.Session;
+        const bookingId = session.metadata?.bookingId;
+
+        if (!bookingId) break;
+
+        await prismaClient.bookings.update({
+          where: { id: bookingId },
+          data: { payment_status: "CONFIRMED" },
+        });
+        const booking = await prismaClient.bookings.findFirst({
+          where: { id: bookingId },
+        });
+        await emailQueue.add(
+          "booking-success",
+          { bookingId },
+          {
+            attempts: 5,
+            backoff: { type: "exponential", delay: 5000 },
+            removeOnComplete: true,
+            removeOnFail: false,
+          }
+        );
+
+        break;
+      }
+
+      /**
+       * ❌ PAYMENT FAILED
+       */
+      case "payment_intent.payment_failed": {
+        const intent = event.data.object as Stripe.PaymentIntent;
+        const bookingId = intent.metadata?.bookingId;
+
+        if (!bookingId) break;
+
+        await prismaClient.bookings.update({
+          where: { id: bookingId },
+          data: { payment_status: "FAILED" },
+        });
+
+        const booking = await prismaClient.bookings.findFirst({
+          where: { id: bookingId },
+        });
+
+        if (!booking) break;
+
+        try {
+          await transporterMain.sendMail({
+            from: process.env.APP_EMAIL,
+            to: booking.email,
+            subject: "❌ Payment Failed – Action Required for Your Booking",
+            text: `
+Hello ${booking.fullName},
+
+Unfortunately, your payment for the tour package "${booking.packagename}" could not be completed.
+
+
+
+Your booking has NOT been confirmed because the payment was unsuccessful.
+
+Possible reasons include:
+- Insufficient funds
+- Card declined by bank
+- Authentication (OTP / 3D Secure) not completed
+
+What you can do next:
+- Try making the payment again
+- Use a different card or payment method
+- Contact your bank if the issue persists
+
+If you need assistance, please contact us at ${process.env.OWNER_EMAIL}.
+
+We look forward to assisting you and welcoming you to the Kingdom of Bhutan.
+
+Warm regards,
+Tour Booking Team
+`,
+          });
+        } catch (mailErr) {
+          console.error("Failed payment email error", mailErr);
+        }
+
+        break;
+      }
+
+      /**
+       * 🚫 USER CANCELLED / SESSION EXPIRED
+       */
+      case "checkout.session.expired": {
+        const session = event.data.object as Stripe.Checkout.Session;
+        const bookingId = session.metadata?.bookingId;
+
+        if (!bookingId) break;
+
+        await prismaClient.bookings.update({
+          where: { id: bookingId },
+          data: { payment_status: "CANCELLED" },
+        });
+
+        break;
+      }
+
+      default:
+        // Ignore other events
+        break;
+    }
+  } catch (dbErr) {
+    console.error("Webhook DB update failed", dbErr);
+    // ⚠️ Do not fail webhook — Stripe will retry and cause duplicates
+  }
+
+  // ✅ Always acknowledge Stripe
+};
 
 routesUser.post("/bookingSave", async (req: Request, res: Response) => {
   const bookingInfo = req.body;
   let tourpackage = null;
   let booking = null;
+  let image = null;
   if (bookingInfo.bookingType == "package") {
     tourpackage = await prismaClient.tourPackages.findFirst({
       where: {
         id: req.body.packageId,
       },
     });
+    image = tourpackage?.mainImage;
   } else {
     tourpackage = await prismaClient.events.findFirst({
       where: {
         id: req.body.packageId,
       },
     });
+    image = tourpackage?.image;
   }
 
   if (!tourpackage) {
@@ -190,35 +240,40 @@ routesUser.post("/bookingSave", async (req: Request, res: Response) => {
   }
 
   const tourDescription = [...tourpackage.description].toString();
-  const tourImage = base_url + tourpackage.mainImage;
+
   console.log(tourDescription);
   const session = await stripe.checkout.sessions.create({
     mode: "payment",
+
+    // ✅ CRITICAL: metadata at SESSION level (webhook-safe)
+    metadata: {
+      bookingId: booking.id.toString(),
+      bookingType: bookingInfo.bookingType, // optional but useful
+    },
+
     line_items: [
       {
         price_data: {
-          currency: "usd",
+          currency: "inr", // ✅ use INR if your price is in rupees
+
           product_data: {
             name: tourpackage.name,
-            description: tourDescription,
+            description: tourpackage.description.join(", "),
             images: [
-              "https://images.pexels.com/photos/33317573/pexels-photo-33317573.jpeg?_gl=1*mmfjul*_ga*NTE4MDQyNTg2LjE3NTMyNjgxMTQ.*_ga_8JE65Q40S6*czE3NjM4MDQzNzUkbzMkZzAkdDE3NjM4MDQzNzUkajYwJGwwJGgw",
+              `${base_url}/${image}`, // ✅ must be publicly accessible
             ],
-            metadata: {
-              bookingId: booking.id,
-              travelers: booking.travelers.toString(),
-              arrival: booking.arrival_date.toISOString(),
-              departure: booking.departure_date.toISOString(),
-              email: booking.email,
-            },
           },
-          unit_amount: booking.total_amount * 100, // convert rupees to paise
+
+          // ₹ → paise
+          unit_amount: booking.total_amount * 100,
         },
         quantity: 1,
       },
     ],
-    success_url: "http://127.0.0.1:5501/payment-success.html",
-    cancel_url: "http://localhost:5500/payment-cancel.html",
+
+    // ✅ USER REDIRECT (UX ONLY)
+    success_url: `http://127.0.0.1:5500/Tourism-main/payment-success.html`,
+    cancel_url: `http://localhost:5500/Tourism-main/payment-success.html`,
   });
 
   return res.json({ ok: "ok", url: session.url });
