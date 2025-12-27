@@ -272,8 +272,10 @@ routesUser.post("/bookingSave", async (req: Request, res: Response) => {
     ],
 
     // ✅ USER REDIRECT (UX ONLY)
-    success_url: `http://127.0.0.1:5500/Tourism-main/payment-success.html`,
-    cancel_url: `http://localhost:5500/Tourism-main/payment-success.html`,
+    success_url:
+      "https://tourismfrontend.anythingforall.com/payment-success.html",
+    cancel_url:
+      "https://tourismfrontend.anythingforall.com/payment-cancel.html",
   });
 
   return res.json({ ok: "ok", url: session.url });
