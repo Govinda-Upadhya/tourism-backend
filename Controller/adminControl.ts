@@ -480,7 +480,14 @@ export const deleteVehicle = async (req: Request, res: Response) => {
 };
 
 export const viewBookings = async (req: Request, res: Response) => {
-  const bookings = await prismaClient.bookings.findMany({});
+  const bookings = await prismaClient.bookings.findMany({
+    where: {
+      payment_status: {
+        not: "PENDING",
+      },
+    },
+  });
+
   return res.json({ bookings });
 };
 export const deleteBooking = async (req: Request, res: Response) => {

@@ -5,7 +5,7 @@ import path from "path";
 import { routesUser, webHook } from "./Routes/userRoutes";
 
 export const app = e();
-export const base_url = "https://tourismbackend.anythingforall.com";
+export const base_url = process.env.BASE_URL;
 app.post("/user/webhook", e.raw({ type: "application/json" }), webHook);
 app.use(e.json());
 app.use(cors({ origin: "*" }));

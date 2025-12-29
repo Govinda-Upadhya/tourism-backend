@@ -78,7 +78,7 @@ export const webHook = async (req: Request, res: Response) => {
           "booking-success",
           { bookingId },
           {
-            attempts: 5,
+            attempts: 1,
             backoff: { type: "exponential", delay: 5000 },
             removeOnComplete: true,
             removeOnFail: false,
@@ -173,13 +173,14 @@ Tour Booking Team
     // ⚠️ Do not fail webhook — Stripe will retry and cause duplicates
   }
 
-  // ✅ Always acknowledge Stripe
+  return res.status(200).json({ received: true });
 };
 
 routesUser.post("/bookingSave", async (req: Request, res: Response) => {
   const bookingInfo = req.body;
   let tourpackage = null;
   let booking = null;
+
   let image = null;
   if (bookingInfo.bookingType == "package") {
     tourpackage = await prismaClient.tourPackages.findFirst({
@@ -217,6 +218,7 @@ routesUser.post("/bookingSave", async (req: Request, res: Response) => {
         total_amount: tourpackage.price,
         payment_status: "PENDING", // or use enum type
         tourPackageId: req.body.packageId,
+        packagename: tourpackage.name,
       },
     });
   } else {
@@ -235,6 +237,7 @@ routesUser.post("/bookingSave", async (req: Request, res: Response) => {
         total_amount: tourpackage.price,
         payment_status: "PENDING", // or use enum type
         eventId: req.body.packageId,
+        packagename: tourpackage.name,
       },
     });
   }

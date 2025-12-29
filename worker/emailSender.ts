@@ -1,7 +1,16 @@
-// workers/emailWorker.ts
 import { Worker } from "bullmq";
 import { redisConnection } from "../lib";
 import { prismaClient, transporterMain } from "../lib";
+import { bookingConfirmationHTML } from "../utils/emailTemplate";
+
+const formatDate = (date: Date | null) =>
+  date
+    ? new Intl.DateTimeFormat("en-IN", {
+        day: "2-digit",
+        month: "long",
+        year: "numeric",
+      }).format(new Date(date))
+    : "N/A";
 
 new Worker(
   "email-queue",
@@ -12,40 +21,67 @@ new Worker(
       where: { id: bookingId },
     });
 
-    if (!booking) return;
+    if (!booking) {
+      throw new Error("Booking not found");
+    }
+
+    /* ---------------- CUSTOMER EMAIL ---------------- */
 
     await transporterMain.sendMail({
-      from: process.env.APP_EMAIL,
-      to: booking?.email,
-      subject: "successfully booked the package",
-      text: `Hello ${booking?.fullName} your booking for our ${booking?.packagename} has been successful. Here are the booking details.
-          BookingId:${booking?.id}
-          Booking Date:${booking?.booking_date}
-          Arrival Date:${booking?.arrival_date}
-          Departure Date:${booking?.departure_date}
-          vehicle: ${booking?.vehicle}
-          payment: ${booking?.total_amount}
-          For further questions please contact the owner ${process.env.OWNER_EMAIL}
-          We graciously welcome you to the kingdom of Bhutan.`,
+      from: `"Bhutan Travel" <${process.env.APP_EMAIL}>`,
+      to: booking.email,
+      subject: "🎉 Your Booking Is Confirmed!",
+      text: `
+Hello ${booking.fullName},
+
+Your booking has been successfully confirmed.
+
+Booking ID      : ${booking.id}
+Package Name   : ${booking.packagename}
+Booking Date   : ${formatDate(booking.booking_date)}
+Arrival Date   : ${formatDate(booking.arrival_date)}
+Departure Date : ${formatDate(booking.departure_date)}
+Vehicle        : ${booking.vehicle}
+Total Payment  : ₹${booking.total_amount}
+
+For any assistance, contact:
+${process.env.OWNER_EMAIL}
+
+Welcome to the Kingdom of Bhutan 🇧🇹
+`,
+      html: bookingConfirmationHTML({
+        fullName: booking.fullName,
+        bookingId: booking.id,
+        packageName: booking.packagename,
+        bookingDate: formatDate(booking.booking_date),
+        arrivalDate: formatDate(booking.arrival_date),
+        departureDate: formatDate(booking.departure_date),
+        vehicle: booking.vehicle,
+        totalAmount: booking.total_amount,
+        ownerEmail: process.env.OWNER_EMAIL!,
+      }),
     });
+
+    /* ---------------- OWNER EMAIL ---------------- */
+
     await transporterMain.sendMail({
-      from: process.env.APP_EMAIL,
+      from: `"Booking System" <${process.env.APP_EMAIL}>`,
       to: process.env.OWNER_EMAIL,
-      subject: "Booking notification",
-      text: `Hello there is another successful booking for ${booking?.packagename}. Here are the booking details.
-          BookingId:${booking?.id}
-          Booking Date:${booking?.booking_date}
-          Arrival Date:${booking?.arrival_date}
-          Departure Date:${booking?.departure_date}
-          vehicle: ${booking?.vehicle}
-          payment: ${booking?.total_amount}
-          client_email: ${booking?.email}
-          full Name:${booking?.fullName}
-          Please contact the client personally.`,
+      subject: "📢 New Booking Received",
+      text: `
+New booking confirmed.
+
+Booking ID : ${booking.id}
+Package    : ${booking.packagename}
+Customer   : ${booking.fullName}
+Email      : ${booking.email}
+Payment    : ₹${booking.total_amount}
+`,
     });
   },
   {
     connection: redisConnection,
+    concurrency: 5,
   }
 );
 
